@@ -1,0 +1,310 @@
+# Homelab media automation stack.
+# Requests -> *arr managers -> indexers and downloads (behind a VPN) -> Jellyfin.
+# See README.md for the architecture, the reasoning behind it and how to run it.
+
+# ---------------------------------------------------------------------------
+# Shared settings
+# ---------------------------------------------------------------------------
+x-linuxserver-env: &lsio-env
+  PUID: ${PUID}
+  PGID: ${PGID}
+  TZ: ${TZ}
+  UMASK: "022"
+
+x-restart: &restart
+  restart: unless-stopped
+
+# Services that live inside gluetun's network namespace: no network of their
+# own, they start only once the tunnel is healthy and restart with it.
+x-behind-vpn: &behind-vpn
+  network_mode: service:gluetun
+  depends_on:
+    gluetun:
+      condition: service_healthy
+      restart: true
+
+# A cheap "is the internet reachable from here" probe. Inside the VPN namespace
+# it fails when the tunnel stalls, and deunhealth then restarts the container.
+x-vpn-probe: &vpn-probe
+  test: ["CMD-SHELL", "ping -c 1 -W 5 1.1.1.1 || exit 1"]
+  interval: 60s
+  timeout: 10s
+  retries: 3
+  start_period: 30s
+
+networks:
+  servarrnetwork:
+    name: servarrnetwork
+    ipam:
+      config:
+        - subnet: 172.39.0.0/24
+
+services:
+  # ===========================================================================
+  # INFRASTRUCTURE
+  # ===========================================================================
+
+  # VPN tunnel. Only what talks to trackers goes through it: qBittorrent (joins
+  # the swarm), Prowlarr (queries indexers and fetches .torrent/magnet files for
+  # Sonarr/Radarr/Lidarr) and FlareSolverr. The *arr managers never contact a
+  # tracker themselves, so routing them too would add failure modes without
+  # hiding anything.
+  # Trade-off: indexers see a shared VPN address, which means more Cloudflare
+  # challenges and, on private trackers, logins from a known VPN range.
+  gluetun:
+    image: qmcgaw/gluetun:v3.41.3
+    container_name: gluetun
+    <<: *restart
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun   # in an LXC container, see README "Running in LXC"
+    env_file: .env                  # VPN provider and keys, FIREWALL_OUTBOUND_SUBNETS
+    volumes:
+      - ./gluetun:/gluetun
+    networks: [servarrnetwork]
+    # Everything sharing this namespace publishes its ports here.
+    ports:
+      - 8080:8080   # qBittorrent web UI
+      - 9696:9696   # Prowlarr
+      - 8191:8191   # FlareSolverr (only for debugging; Prowlarr reaches it on localhost)
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Restarts containers labelled deunhealth.restart.on.unhealthy=true when their
+  # healthcheck fails, e.g. qBittorrent stalling after the VPN reconnects.
+  # Note: it needs the Docker socket, i.e. root-equivalent access to the host.
+  deunhealth:
+    image: qmcgaw/deunhealth:v0.3.0
+    container_name: deunhealth
+    restart: always
+    network_mode: none
+    environment:
+      LOG_LEVEL: info
+      HEALTH_SERVER_ADDRESS: 127.0.0.1:9999
+      TZ: ${TZ}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # ===========================================================================
+  # DOWNLOADS AND INDEXERS (behind the VPN)
+  # ===========================================================================
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:5.2.4_v2.0.15-ls480
+    container_name: qbittorrent
+    <<: [*restart, *behind-vpn]
+    labels:
+      deunhealth.restart.on.unhealthy: "true"
+    environment:
+      <<: *lsio-env
+      WEBUI_PORT: 8080   # must match the port published on gluetun
+    volumes:
+      - ./qbittorrent:/config
+      - ${DATA_DIR}:/data
+    healthcheck: *vpn-probe
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:2.6.5.5623-ls163
+    container_name: prowlarr
+    <<: [*restart, *behind-vpn]
+    labels:
+      deunhealth.restart.on.unhealthy: "true"
+    environment:
+      <<: *lsio-env
+    volumes:
+      - ./prowlarr/config:/config
+      - ./prowlarr/cache:/cache
+    healthcheck: *vpn-probe
+
+  # Solves Cloudflare challenges for Prowlarr. It shares the namespace with
+  # Prowlarr, so Cloudflare sees the same address solve the challenge and then
+  # use it. In Prowlarr point it at http://localhost:8191.
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:v3.5.2
+    container_name: flaresolverr
+    <<: [*restart, *behind-vpn]
+    environment:
+      TZ: ${TZ}
+
+  # ===========================================================================
+  # LIBRARY MANAGEMENT
+  # ===========================================================================
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:4.0.20.3014-ls327
+    container_name: sonarr
+    <<: *restart
+    environment:
+      <<: *lsio-env
+    volumes:
+      - ./sonarr:/config
+      - ${DATA_DIR}:/data
+    networks: [servarrnetwork]
+    ports: [8989:8989]
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:6.4.4.10685-ls319
+    container_name: radarr
+    <<: *restart
+    environment:
+      <<: *lsio-env
+    volumes:
+      - ./radarr:/config
+      - ${DATA_DIR}:/data
+    networks: [servarrnetwork]
+    ports: [7878:7878]
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:3.1.0.4875-ls43
+    container_name: lidarr
+    <<: *restart
+    environment:
+      <<: *lsio-env
+    volumes:
+      - ./lidarr:/config
+      - ${DATA_DIR}:/data
+    networks: [servarrnetwork]
+    ports: [8686:8686]
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:v1.6.2-ls367
+    container_name: bazarr
+    <<: *restart
+    environment:
+      <<: *lsio-env
+    volumes:
+      - ./bazarr:/config
+      - ${DATA_DIR}:/data
+    networks: [servarrnetwork]
+    ports: [6767:6767]
+
+  # Quality profiles and custom formats synced into Sonarr and Radarr.
+  profilarr:
+    image: ghcr.io/dictionarry-hub/profilarr:2.2.0
+    container_name: profilarr
+    <<: *restart
+    environment:
+      <<: *lsio-env
+      ORIGIN: ${PROFILARR_ORIGIN}   # the URL you open it at, behind the reverse proxy
+    volumes:
+      - ./profilarr:/config
+    networks: [servarrnetwork]
+    ports: [6868:6868]
+
+  # ===========================================================================
+  # MAINTENANCE
+  # ===========================================================================
+
+  # Removes stalled and failed downloads and blocks the releases behind them.
+  cleanuparr:
+    image: ghcr.io/cleanuparr/cleanuparr:2.10.9
+    container_name: cleanuparr
+    <<: *restart
+    environment:
+      <<: *lsio-env
+      PORT: 11011
+    volumes:
+      - ./cleanuparr:/config
+      - ${DATA_DIR}:/data
+    networks: [servarrnetwork]
+    ports: [11011:11011]
+    depends_on: [sonarr, radarr, qbittorrent]
+
+  # Tells Jellyfin to scan exactly the imported folder right away instead of
+  # waiting for the periodic library scan. No versioned releases: pinned by digest.
+  autoscan:
+    image: ghcr.io/niniyas/autoscan:latest@sha256:b106eebc9e0d31680904ce19fe9497457729adb7a0c52f5ad6830767da0946ca
+    container_name: autoscan
+    <<: *restart
+    environment:
+      <<: *lsio-env
+    volumes:
+      - ./autoscan:/config
+    networks: [servarrnetwork]
+    ports: [3468:3468]
+    depends_on: [jellyfin, sonarr, radarr]
+
+  # ===========================================================================
+  # MEDIA SERVER AND REQUESTS
+  # ===========================================================================
+
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:10.11.11ubu2604-ls47
+    container_name: jellyfin
+    <<: *restart
+    environment:
+      <<: *lsio-env
+    volumes:
+      - ./jellyfin:/config
+      - ${DATA_DIR}/jellyfin:/data:ro   # the library, read-only: the server never changes it
+    devices:
+      - /dev/dri:/dev/dri   # Intel Quick Sync hardware transcoding
+    networks: [servarrnetwork]
+    ports:
+      - 8096:8096
+      # - 7359:7359/udp   # client discovery on the LAN
+      # - 1900:1900/udp   # DLNA
+
+  # Movie and TV requests (Seerr, the successor of Jellyseerr).
+  jellyseerr:
+    image: ghcr.io/seerr-team/seerr:v3.5.0
+    container_name: jellyseerr
+    <<: *restart
+    init: true
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - ./jellyseerr:/app/config
+    networks: [servarrnetwork]
+    ports: [5055:5055]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:5055/api/v1/settings/public || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on: [jellyfin, sonarr, radarr]
+
+  # Music requests, handed to Lidarr.
+  musicseerr:
+    image: ghcr.io/habirabbu/musicseerr:v2.11.0
+    container_name: musicseerr
+    <<: *restart
+    environment:
+      <<: *lsio-env
+    volumes:
+      - ./musicseer/config:/app/config
+      - ./musicseer/cache:/app/cache
+      - ${DATA_DIR}/jellyfin:/music:ro
+    networks: [servarrnetwork]
+    ports: [8688:8688]
+    depends_on: [lidarr, jellyfin]
+
+  # ===========================================================================
+  # FRONTEND
+  # ===========================================================================
+
+  # The Jellyfin library as a walkable 1990s video rental store, rendered in
+  # the browser. Not a linuxserver image: it runs as root and ignores PUID/PGID.
+  halcyon:
+    image: ghcr.io/halcyon-video/halcyon-video:0.25.0   # amd64 only
+    container_name: halcyon
+    <<: *restart
+    init: true
+    environment:
+      TZ: ${TZ}
+      # Vite only accepts localhost and bare-IP Host headers by default:
+      # list every hostname you open the store at.
+      HALCYON_ALLOWED_HOSTS: ${HALCYON_ALLOWED_HOSTS}
+      # Log in to Jellyfin once in any browser and enable
+      # Settings -> Connection -> Remote Play to hand that login to the server.
+      REMOTE_PLAY_SEED: /config/remote-play-seed.json
+    volumes:
+      - ./halcyon:/config
+    networks: [servarrnetwork]
+    ports: [1420:1420]
+    depends_on: [jellyfin, jellyseerr]

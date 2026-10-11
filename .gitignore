@@ -1,0 +1,18 @@
+# secrets
+.env
+
+# application state created next to compose.yml at runtime
+/gluetun/
+/qbittorrent/
+/prowlarr/
+/sonarr/
+/radarr/
+/lidarr/
+/bazarr/
+/profilarr/
+/cleanuparr/
+/autoscan/
+/jellyfin/
+/jellyseerr/
+/musicseer/
+/halcyon/

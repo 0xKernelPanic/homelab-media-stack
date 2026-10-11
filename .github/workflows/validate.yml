@@ -1,0 +1,28 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compose file resolves with the example settings
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+
+      - name: Every image is pinned to a version or a digest
+        run: |
+          unpinned=$(docker compose config --images | grep -Ev ':[^:@]*[0-9][^:@]*$|@sha256:' || true)
+          if [ -n "$unpinned" ]; then echo "Not pinned:"; echo "$unpinned"; exit 1; fi
+
+      - name: No .env committed
+        run: |
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then echo ".env must not be committed"; exit 1; fi
