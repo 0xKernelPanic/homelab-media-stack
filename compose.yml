@@ -32,6 +32,8 @@ x-vpn-probe: &vpn-probe
   retries: 3
   start_period: 30s
 
+# Fixed addresses: the apps store each other's URLs in their own settings, so
+# an address must survive the container being recreated.
 networks:
   servarrnetwork:
     name: servarrnetwork
@@ -61,8 +63,11 @@ services:
     env_file: .env                  # VPN provider and keys, FIREWALL_OUTBOUND_SUBNETS
     volumes:
       - ./gluetun:/gluetun
-    networks: [servarrnetwork]
-    # Everything sharing this namespace publishes its ports here.
+    networks:
+      servarrnetwork:
+        ipv4_address: 172.39.0.2
+    # Everything sharing this namespace publishes its ports here, and the rest
+    # of the stack reaches qBittorrent and Prowlarr at this address.
     ports:
       - 8080:8080   # qBittorrent web UI
       - 9696:9696   # Prowlarr
@@ -104,7 +109,7 @@ services:
       WEBUI_PORT: 8080   # must match the port published on gluetun
     volumes:
       - ./qbittorrent:/config
-      - ${DATA_DIR}:/data
+      - ${DATA_DIR:-/data}:/data
     healthcheck: *vpn-probe
 
   prowlarr:
@@ -142,8 +147,10 @@ services:
       <<: *lsio-env
     volumes:
       - ./sonarr:/config
-      - ${DATA_DIR}:/data
-    networks: [servarrnetwork]
+      - ${DATA_DIR:-/data}:/data
+    networks:
+      servarrnetwork:
+        ipv4_address: 172.39.0.6
     ports: [8989:8989]
 
   radarr:
@@ -154,8 +161,10 @@ services:
       <<: *lsio-env
     volumes:
       - ./radarr:/config
-      - ${DATA_DIR}:/data
-    networks: [servarrnetwork]
+      - ${DATA_DIR:-/data}:/data
+    networks:
+      servarrnetwork:
+        ipv4_address: 172.39.0.7
     ports: [7878:7878]
 
   lidarr:
@@ -166,8 +175,10 @@ services:
       <<: *lsio-env
     volumes:
       - ./lidarr:/config
-      - ${DATA_DIR}:/data
-    networks: [servarrnetwork]
+      - ${DATA_DIR:-/data}:/data
+    networks:
+      servarrnetwork:
+        ipv4_address: 172.39.0.8
     ports: [8686:8686]
 
   bazarr:
@@ -178,8 +189,10 @@ services:
       <<: *lsio-env
     volumes:
       - ./bazarr:/config
-      - ${DATA_DIR}:/data
-    networks: [servarrnetwork]
+      - ${DATA_DIR:-/data}:/data
+    networks:
+      servarrnetwork:
+        ipv4_address: 172.39.0.9
     ports: [6767:6767]
 
   # Quality profiles and custom formats synced into Sonarr and Radarr.
@@ -192,7 +205,9 @@ services:
       ORIGIN: ${PROFILARR_ORIGIN}   # the URL you open it at, behind the reverse proxy
     volumes:
       - ./profilarr:/config
-    networks: [servarrnetwork]
+    networks:
+      servarrnetwork:
+        ipv4_address: 172.39.0.13
     ports: [6868:6868]
 
   # ===========================================================================
@@ -209,8 +224,10 @@ services:
       PORT: 11011
     volumes:
       - ./cleanuparr:/config
-      - ${DATA_DIR}:/data
-    networks: [servarrnetwork]
+      - ${DATA_DIR:-/data}:/data
+    networks:
+      servarrnetwork:
+        ipv4_address: 172.39.0.14
     ports: [11011:11011]
     depends_on: [sonarr, radarr, qbittorrent]
 
@@ -224,7 +241,9 @@ services:
       <<: *lsio-env
     volumes:
       - ./autoscan:/config
-    networks: [servarrnetwork]
+    networks:
+      servarrnetwork:
+        ipv4_address: 172.39.0.15
     ports: [3468:3468]
     depends_on: [jellyfin, sonarr, radarr]
 
@@ -240,10 +259,12 @@ services:
       <<: *lsio-env
     volumes:
       - ./jellyfin:/config
-      - ${DATA_DIR}/jellyfin:/data:ro   # the library, read-only: the server never changes it
+      - ${DATA_DIR:-/data}/jellyfin:/data:ro   # the library, read-only: the server never changes it
     devices:
       - /dev/dri:/dev/dri   # Intel Quick Sync hardware transcoding
-    networks: [servarrnetwork]
+    networks:
+      servarrnetwork:
+        ipv4_address: 172.39.0.4
     ports:
       - 8096:8096
       # - 7359:7359/udp   # client discovery on the LAN
@@ -259,7 +280,9 @@ services:
       TZ: ${TZ}
     volumes:
       - ./jellyseerr:/app/config
-    networks: [servarrnetwork]
+    networks:
+      servarrnetwork:
+        ipv4_address: 172.39.0.3
     ports: [5055:5055]
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:5055/api/v1/settings/public || exit 1"]
@@ -279,8 +302,10 @@ services:
     volumes:
       - ./musicseer/config:/app/config
       - ./musicseer/cache:/app/cache
-      - ${DATA_DIR}/jellyfin:/music:ro
-    networks: [servarrnetwork]
+      - ${DATA_DIR:-/data}/jellyfin:/music:ro
+    networks:
+      servarrnetwork:
+        ipv4_address: 172.39.0.5
     ports: [8688:8688]
     depends_on: [lidarr, jellyfin]
 
@@ -305,6 +330,8 @@ services:
       REMOTE_PLAY_SEED: /config/remote-play-seed.json
     volumes:
       - ./halcyon:/config
-    networks: [servarrnetwork]
+    networks:
+      servarrnetwork:
+        ipv4_address: 172.39.0.16
     ports: [1420:1420]
     depends_on: [jellyfin, jellyseerr]

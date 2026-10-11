@@ -80,15 +80,22 @@ docker compose up -d
 docker compose ps        # gluetun should turn "healthy" within a minute
 ```
 
-Inside the stack, services reach each other by name. The ones behind the VPN are reached through gluetun:
+Every container has a fixed address on `servarrnetwork` (172.39.0.0/24), because the apps store each other's URLs in their own settings and those must survive a container being recreated. The containers behind the VPN have no address of their own and answer on gluetun's:
 
 | From | To | URL |
 |---|---|---|
-| Sonarr, Radarr, Lidarr | qBittorrent | `http://gluetun:8080` |
-| Sonarr, Radarr, Lidarr | Prowlarr | `http://gluetun:9696` |
-| Prowlarr | FlareSolverr | `http://localhost:8191` |
-| Prowlarr | Sonarr, Radarr, Lidarr | `http://sonarr:8989`, `http://radarr:7878`, `http://lidarr:8686` |
-| Seerr, autoscan | Jellyfin | `http://jellyfin:8096` |
+| Sonarr, Radarr, Lidarr | qBittorrent | `http://172.39.0.2:8080` (gluetun) |
+| Sonarr, Radarr, Lidarr | Prowlarr | `http://172.39.0.2:9696` (gluetun) |
+| Prowlarr | FlareSolverr | `http://localhost:8191` (same namespace) |
+| Prowlarr | Sonarr, Radarr, Lidarr | `http://172.39.0.6:8989`, `.7:7878`, `.8:8686` |
+| Seerr, autoscan | Jellyfin | `http://172.39.0.4:8096` |
+
+To check that the tunnel really covers the containers behind it, both of these must print the VPN's address, not yours:
+
+```bash
+docker exec prowlarr curl -s https://ipinfo.io/ip
+docker exec flaresolverr python -c "import urllib.request; print(urllib.request.urlopen('https://ipinfo.io/ip').read().decode())"
+```
 
 ### Running in LXC (Proxmox)
 
@@ -100,6 +107,17 @@ lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 ```
 
 For Quick Sync, pass `/dev/dri` through the same way (`c 226:* rwm`) and map the `render` group.
+
+### Halcyon Remote Play
+
+The store renders in the browser, so it works from the bridge network. Remote Play (server-side rendering for phones and weak TV browsers) streams over WebRTC and has to advertise an address the client can reach, which from the bridge it cannot. For it, replace Halcyon's `ports` and `networks` with:
+
+```yaml
+    network_mode: host    # takes :1420, :3478/udp and 49200-49260/udp (TURN)
+    devices:
+      - /dev/dri:/dev/dri # GL and encoding for the headless Chromium
+    shm_size: 1gb         # Chromium crashes with the default 64 MB /dev/shm
+```
 
 ## Security notes
 
